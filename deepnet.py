@@ -35,12 +35,15 @@ class DeepNet:
       self.nu = nu
 
       # Weights
-      self.b  = [np.zeros((i)) for i in nu]
-      self.W  = [np.zeros((i,j)) for i,j in zip(nu[:-1], nu[1:])]
+      self.b  = [np.random.random((i)) for i in nu]
+      self.W  = [np.random.random((i,j)) for i,j in zip(nu[:-1], nu[1:])]
 
       # Weight gradients
       self.b_grad = [np.zeros((i)) for i in nu]
       self.W_grad = [np.zeros((i,j)) for i,j in zip(nu[:-1], nu[1:])]
+
+      # Loss function
+      self.L = 0
 
    def __cprob(self, d, ld, lt):
       '''
@@ -68,6 +71,7 @@ class DeepNet:
          bg.fill(0)
       for Wg in self.W_grad:
          Wg.fill(0)
+      self.L = 0
 
    def __updateGradients_CD(self, d, l, CDn=1):
       '''
@@ -96,17 +100,63 @@ class DeepNet:
       if l == 0:
          self.b_grad[l] += sl - sl0
 
-      
-   def __preTrainDBN(self, data, epochs, batchsize, LR=0.01, **algopts):
+   def __updateGradients_DAE(self, d, l, noise='mask', noise_p=0.3, compute_L=True):
 
-      ### TODO
-      # Allow the selection of the algorithm to compute P(v,h) (the negative part of the gradient)
-      # Currently implemented is CD.
-      # Could also implement MCMC methods.
-      # Implement them in separate functions so that they can be used in other methods.
-      # These methods only depend on the current parameters (and a current state, if not reset every iteration)
-      ###
+      # Compute sample at top layer
+      x = d.copy()
+      for i in xrange(l):
+         x = sigmoid(np.dot(self.W[i].T, x) + self.b[i+1])
+
+      # Add noise to training sample
+      _x = x.copy()
+      noise_sz = int(len(x)*noise_p)
+      if noise == 'mask':
+         _x[np.random.randint(0, len(x), size=noise_sz)] = 0
+      elif noise == 'randomize':
+         _x[np.random.randint(0, len(x), size=noise_sz)] = np.random.rand(noise_sz)
+
+      # Parameters
+      W = self.W[l].T
+      by = self.b[l+1]
+      bz = self.bz[l]
+
+      # Compute values of network elements
+      y = sigmoid(np.dot(W, _x) + by)
+      z = sigmoid(np.dot(W.T, y) + bz)
+
+      # Naive element-wise computation
+      # W_grad = np.zeros(W.shape)
+      # for i in range(W.shape[0]):
+      #    for j in range(W.shape[1]):
+      #       W_grad[i,j] = (z[j] * (1-x[j]) - x[j]*(1-z[j])) * y[i] * (1+W[i,j]*x[j]*(1-y[i]))
+      # self.W_grad[l] += W_grad.T
+
+      # by_grad = np.zeros(by.shape)
+      # for i in range(W.shape[0]):
+      #    for j in range(W.shape[1]):
+      #       by_grad[i] += (z[j]*(1-x[j]) - x[j]*(1-z[j])) * W[i,j] * y[i] * (1-y[i])
+      # self.b_grad[l+1] += by_grad
+
+      # bz_grad = np.zeros(bz.shape)
+      # for j in range(W.shape[1]):
+      #    bz_grad[j] = z[j] * (1-x[j]) - x[j] * (1-z[j])
+      # self.bz_grad[l] += bz_grad
       
+      # Gradients
+      xz = z*(1-x) - x*(1-z)
+      self.W_grad[l]   += (np.outer(y, xz) * (1 + W * np.outer(1-y, x))).T
+      self.b_grad[l+1] += y * (1-y) * np.dot(W, xz)
+      self.bz_grad[l]  += xz
+
+      # Loss Function
+      if compute_L:
+         #self.L += -np.sum(x*np.log(z) + (1-x)*np.log(1-z))
+         self.L += np.sum((x-z)**2)
+      
+   def __preTrainRBM(self, data, epochs, batchsize, LR=0.01, **algopts):
+      '''
+      Pretrain neural network using RBM algorithm (Contrastive Divergence)
+      '''
       # Layer-wise greedy training
       for layer in xrange(self.nl-1):
          for e in xrange(epochs):
@@ -136,28 +186,89 @@ class DeepNet:
             if remain:
                # Update weights and biases
                for b, bg in zip(self.b, self.b_grad):
-                     b += LR * bg / float(remain)
+                  b += LR * bg / float(remain)
                for W, Wg in zip(self.W, self.W_grad):
-                     W += LR * Wg / float(remain)
+                  W += LR * Wg / float(remain)
 
       # Verbose
       sys.stdout.write('\n')
 
-   def __preTrainDBM(self, data, epochs, batchsize, LR=0.01, **algopts):
+
+   def __preTrainSDAE(self, data, epochs, batchsize, LR=0.01, **algopts):
+      '''
+      Pretrain network as a stack of Denoising AutoEncoders (sDAE)
+      '''
+      # Temp variables
+      self.bz = [np.random.random((i)) for i in self.nu]
+      self.bz_grad = [np.zeros((i)) for i in self.nu]
+      
+      # Backpropagation
+      for layer in xrange(self.nl-1):
+         for e in xrange(epochs):
+            # Reset Gradients
+            self.__resetGradients()
+            # Reshuffle input data
+            np.random.shuffle(data)
+            for it, d in enumerate(data):
+               # End of batch
+               if it % batchsize == 0:
+                  # Update weights and biases
+                  self.W[layer]   += LR * self.W_grad[layer] / float(batchsize)
+                  self.bz[layer]  += LR * self.bz_grad[layer] / float(batchsize)
+                  self.b[layer+1] += LR * self.b_grad[layer+1] / float(batchsize)
+
+                  # Update loss function as mean loss
+                  L = self.L / float(batchsize)
+                  # Reset gradient estimates
+                  self.__resetGradients()
+                  # Verbose
+                  sys.stdout.write('\r[pre-train] alg: DAE | layer: {} | epoch: {} | iteration: {} | Loss: {}    '.format(layer+1, e+1, it/batchsize+1, L))
+                  sys.stdout.flush()
+
+               # Update gradient estimates
+               self.__updateGradients_DAE(d, layer, **algopts)
+
+            # Update weights and biases with last gradient
+            remain = (len(data) % batchsize)
+            if remain:
+               # Update weights and biases
+               self.b[layer+1] += LR * self.b_grad[layer+1] / float(remain)
+               self.W[layer]   += LR * self.W_grad[layer] / float(remain)
+
+      # Verbose
+      sys.stdout.write('\n')
       
 
-   def preTrain(self, data, epochs, batchsize, algorithm='DBN', **algopts):
+   def __preTrainTwoStep(self, data, epochs, batchsize, LR=0.01, **algopts):
+      # Algoritme de pretraining amb two steps.
+      pass
+      
+
+   def preTrain(self, data, epochs, batchsize, algorithm='RBM', **algopts):
       '''
       Unsupervised weight pre-training.
+
+      Common options:
+        - LR  Learning rate for stochastic gradient update [0.005]
+
       Algorithms:
-        - Deep Belief Network ('DBN')
+        - Restricted Boltzmann Machine ('RBM')
           Layer-wise greedy training.
           Algorithm options:
-            - CDn Contrastive divergence order (default 1)
-            - LR  Learning rate (default 0.005)
+            - CDn Contrastive divergence order [1]
+
+        - Denoising Auto Encoder ('DAE')
+          Layer-wise training of denoising autoencoders.
+          Algorithm options:
+            - noise      Noise type ('mask', 'randomize') ['mask']
+            - noise_p    % of samples affected by noise [0.3]
+            - compute_L  Compute Loss function (True/False) [True]
+      
       '''
-      if algorithm == 'DBN':
-         self.__preTrainDBN(data, epochs, batchsize, **algopts)
+      if algorithm == 'RBM':
+         self.__preTrainRBM(data, epochs, batchsize, **algopts)
+      elif algorithm == 'DAE':
+         self.__preTrainSDAE(data, epochs, batchsize, **algopts)
       else:
          raise ValueError('unknown algorithm')
       
@@ -198,7 +309,8 @@ def main():
    mnist_dbn = DeepNet(layers)
 
    # Pre-train DeepNet as DBN
-   mnist_dbn.preTrain(images, epochs=10, batchsize=100, algorithm='DBN', CDn=1, LR=0.5)
+   #   mnist_dbn.preTrain(images, epochs=10, batchsize=100, algorithm='DBN', CDn=1, LR=0.5)
+   mnist_dbn.preTrain(images, epochs=10, batchsize=100, algorithm='DAE', LR=0.5, noise_p=0.1)
    
    # Sample probabilities
    sample_set = []
