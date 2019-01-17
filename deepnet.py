@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import mnist_loader
+import pickle
 
 def plot_digits(m, L=28, fname='digits'):
    samples = len(m)
@@ -44,6 +45,101 @@ class DeepNet:
       # Loss function
       self.L = 0
 
+   ####
+   ## Class helper methods
+   ####
+
+   def __setRandomWeights(self):
+      self.W = [(np.random.random((i,j))-0.5)/np.sqrt(i*j) for i,j in zip(self.nu[:-1], self.nu[1:])]
+
+   def __setZeroWeights(self):
+      self.W = [np.zeros((i,j)) for i,j in zip(self.nu[:-1], self.nu[1:])]
+
+   def __setRandomBiases(self):
+      self.b = [(np.random.random((i))-0.5)/np.sqrt(i) for i in self.nu]
+
+   def __setZeroBiases(self):
+      self.b  = [np.zeros((i)) for i in self.nu]
+
+   def __resetGradients(self):
+      for db in self.db:
+         db.fill(0)
+      for dW in self.dW:
+         dW.fill(0)
+      self.L = 0
+
+
+   ####
+   ## DeepNet Interface Methods
+   ####
+
+   def preTrain(self, data, epochs, batchsize, algorithm='RBM', **algopts):
+      '''
+      Unsupervised weight pre-training.
+
+      Common options:
+        - LR  Learning rate for stochastic gradient update [0.005]
+
+      Algorithms:
+        - Restricted Boltzmann Machine ('RBM')
+          Layer-wise greedy training.
+          Algorithm options:
+            - CDn Contrastive divergence order [1]
+
+        - Denoising Auto Encoder ('DAE')
+          Layer-wise training of denoising autoencoders.
+          Algorithm options:
+            - noise      Noise type ('mask', 'randomize') ['mask']
+            - noise_p    % of samples affected by noise [0.3]
+            - compute_L  Compute Loss function (True/False) [True]
+      
+      '''
+      if algorithm == 'RBM':
+         self.__preTrainRBM(data, epochs, batchsize, **algopts)
+      elif algorithm == 'DBM':
+         self.__preTrainDBM(data, epochs, batchsize, **algopts)
+      elif algorithm == 'DAE':
+         self.__preTrainSDAE(data, epochs, batchsize, **algopts)
+      else:
+         raise ValueError('unknown algorithm')
+
+
+   def generate_RBM(self, v, N=1):
+      samples = np.array(v).reshape(1,self.nu[0])
+      for i in range(N):
+         v = np.array(np.random.rand(self.nu[0]) < v, dtype=int)
+         h = np.array(np.random.rand(self.nu[self.nl-1]) < self.__cprob(v, 0, self.nl-1), dtype=int)
+         v = self.__cprob(self.__cprob(v, 0, self.nl-1), self.nl-1, 0)
+         samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
+
+      return samples
+      
+
+   def generate_DBM(self, d, N=1):
+      '''
+      Computes N sampled iterations of the visible neurons of the RBM.
+      Parameters: 
+        d: Initial value of the visible nodes (nv-dimensional array).
+        N: Number of iterations (consecutive samples)
+      Return value: a matrix containing the original v and one sample per row.
+      '''
+      v = d.copy()
+      samples = np.array(v).reshape(1,self.nu[0])
+      for i in range(N):
+         mu = self.__variationalExpectation(v)
+         h1 = np.array(np.random.rand(self.nu[1]) < mu[1], dtype=int)
+         v = sigmoid(np.dot(self.W[0], h1) + b0)
+         samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
+
+      return samples
+
+
+   ####
+   ## Restricted Boltzmann Machine
+   ####
+
+   ## RBM: Conditional Probabilities
+   
    def __cprob(self, d, ld, lt):
       '''
       Computes the conditional probabilities in the l-th layer units
@@ -65,12 +161,7 @@ class DeepNet:
             
       return cp
 
-   def __resetGradients(self):
-      for db in self.db:
-         db.fill(0)
-      for dW in self.dW:
-         dW.fill(0)
-      self.L = 0
+   ## RBM: Gradient Update
 
    def __updateGradients_CD(self, d, l, CDn=1):
       '''
@@ -92,148 +183,24 @@ class DeepNet:
          sr = np.array(np.random.rand(self.nu[l+1]) < self.__cprob(sl,l,l+1), dtype=int)
            
       # Update weight gradients
-      self.dW[l] += np.outer(sl,sr) - np.outer(sl0,sr0)
+      self.dW[l] += np.outer(sl0,sr0) - np.outer(sl,sr)
       
       # Update bias gradients
-      self.db[l+1] += sr - sr0
+      self.db[l+1] += sr0 - sr
       if l == 0:
-         self.db[l] += sl - sl0
-
-   def __updateGradients_DAE(self, d, l, noise='mask', noise_p=0.3, compute_L=True):
-
-      # Compute sample at top layer
-      x = d.copy()
-      for i in xrange(l):
-         x = sigmoid(np.dot(self.W[i].T, x) + self.b[i+1])
-
-      # Add noise to training sample
-      _x = x.copy()
-      noise_sz = int(len(x)*noise_p)
-      if noise == 'mask':
-         _x[np.random.choice(np.arange(len(x)), size=noise_sz)] = 0
-      elif noise == 'randomize':
-         _x[np.random.choice(np.arange(len(x)), size=noise_sz)] = np.random.rand(noise_sz)
-
-      # Parameters
-      W = self.W[l].T
-      by = self.b[l+1]
-      bz = self.b[l]
-
-      # Compute values of network elements
-      y = sigmoid(np.dot(W, _x) + by)
-      z = sigmoid(np.dot(W.T, y) + bz)
-      
-      # Gradients
-      xz = z*(1-x) - x*(1-z)
-      self.dW[l]   += np.outer(x, y*(1-y) * np.dot(W, xz)) + np.outer(xz, y)
-      self.db[l+1] += y * (1-y) * np.dot(W, xz)
-      if l == 0:
-         self.db[l]+= xz
-
-      # Loss Function
-      if compute_L:
-         self.L += -np.sum(x*np.log(z) + (1-x)*np.log(1-z))
-
+         self.db[l] += sl0 - sl
          
-   def __cprob_h_EO(self, s):
-      '''
-      Computes the Conditional probabilities of the hidden units given the visible
-      units in even-odd topology.
-      The only difference from a normal RBM is that the hidden and visible layers
-      are not fully connected.
 
-      Arguments:
-        s  Samples
-      '''
-      # Energies of the hidden units
-      E = [np.zeros(n) for n in self.nu]      
-      for l in xrange(len(self.nu)-1):
-         if l % 2 == 0:
-            E[l+1] += np.dot(self.W[l].T,s[l])
-         else:
-            E[l] += np.dot(self.W[l],s[l+1])
-
-      # Conditional probabilities of the hidden units
-      Ph = [np.zeros(n) for n in self.nu]
-      for l in np.arange(1,len(self.nu),step=2):
-         Ph[l] = sigmoid(E[l] + self.b[l])
-
-      return Ph
-
-
-   def __cprob_v_EO(self, s):
-      '''
-      Computes the Conditional probabilities of the visible units given the hidden
-      units in even-odd topology.
-      The only difference from a normal RBM is that the hidden and visible layers
-      are not fully connected.
-      '''
-      # Energies of the visible units
-      E = [np.zeros(n) for n in self.nu]      
-      for l in xrange(len(self.nu)-1):
-         if l % 2 == 0:
-            E[l] += np.dot(self.W[l],s[l+1])
-         else:
-            E[l+1] += np.dot(self.W[l].T,s[l])
-
-      # Conditional probabilities of the visible units
-      Pv = [np.zeros(n) for n in self.nu]
-      for l in np.arange(len(self.nu),step=2):
-         Pv[l] = sigmoid(E[l] + self.b[l])
-
-      return Pv
-      
-
-
-   def __updateGradients_EO(self, d_eo, CDn=1):
-      '''
-      This is a special case of Contrastive Divergence, only used in stage2 of DBM
-      pretraining. This works on even-odd RBMs, in which the visible layer is the
-      concatenation of the even layers and the hidden layer is the concatenation of
-      the odd layers.
-      The only difference wrt a normal RBM is that the visible and the hidden layers
-      are not fully connected.
-
-      Arguments:
-        d    A list of data matrices containing the input samples.
-        CDn  Contrastive divergence order
-      '''
-
-      ## Initial samples
-      # Sample visible layer
-      v0 = [np.array(np.random.rand(len(d)) < d, dtype=int) if d is not None else None for d in d_eo]
-      # Sample hidden layer
-      Ph = self.__cprob_h_EO(d_eo) # <--- Never contains None (has 0-arrays instead).
-      h0 = [np.array(np.random.rand(len(p)) < p, dtype=int) if p is not None else None for p in Ph]
-      
-
-      ## Contrastive divergence
-      h = h0
-      for i in range(CDn):
-         Pv = self.__cprob_v_EO(h)
-         v  = [np.array(np.random.rand(len(p)) < p, dtype=int) if p is not None else None for p in Pv]
-         Ph = self.__cprob_h_EO(v)
-         h  = [np.array(np.random.rand(len(p)) < p, dtype=int) if p is not None else None for p in Ph]
-         
-      # Update weight gradients
-      for l in range(len(self.nu)-1):
-         if l % 2 == 0:
-            self.dW[l] += np.outer(v[l], h[l+1]) - np.outer(v0[l], h0[l+1])
-         else:
-            self.dW[l] += np.outer(h[l], v[l+1]) - np.outer(h0[l], v0[l+1])
-      
-      # Update bias gradients
-      for l in range(len(self.nu)):
-         if l % 2 == 0:
-            self.db[l] += v[l] - v0[l]
-         else:
-            self.db[l] += h[l] - h0[l]
-
-            
+   ## RBM: Training
+   
    def __preTrainRBM(self, data, epochs, batchsize, LR=0.01, **algopts):
       '''
       Pretrain neural network using RBM algorithm (Contrastive Divergence)
       '''
+      # Reset Weights and Biases
+      self.__setZeroWeights()
+      self.__setZeroBiases()
+         
       # Layer-wise greedy training
       for layer in xrange(self.nl-1):
          for e in xrange(epochs):
@@ -271,10 +238,58 @@ class DeepNet:
       sys.stdout.write('\n')
 
 
+   ####
+   ## Denoising AutoEncoder
+   ####
+
+   ## DAE: Gradient Update
+   
+   def __updateGradients_DAE(self, d, l, noise='mask', noise_p=0.3, compute_L=True):
+
+      # Compute sample at top layer
+      x = d.copy()
+      for i in xrange(l):
+         x = sigmoid(np.dot(self.W[i].T, x) + self.b[i+1])
+
+      # Add noise to training sample
+      _x = x.copy()
+      noise_sz = int(len(x)*noise_p)
+      if noise == 'mask':
+         _x[np.random.choice(np.arange(len(x)), size=noise_sz)] = 0
+      elif noise == 'randomize':
+         _x[np.random.choice(np.arange(len(x)), size=noise_sz)] = np.random.rand(noise_sz)
+
+      # Parameters
+      W = self.W[l].T
+      by = self.b[l+1]
+      bz = self.b[l]
+
+      # Compute values of network elements
+      y = sigmoid(np.dot(W, _x) + by)
+      z = sigmoid(np.dot(W.T, y) + bz)
+      
+      # Gradients
+      xz = z*(1-x) - x*(1-z)
+      self.dW[l]   += np.outer(x, y*(1-y) * np.dot(W, xz)) + np.outer(xz, y)
+      self.db[l+1] += y * (1-y) * np.dot(W, xz)
+      if l == 0:
+         self.db[l]+= xz
+
+      # Loss Function
+      if compute_L:
+         self.L += -np.sum(x*np.log(z) + (1-x)*np.log(1-z))
+
+
+   ## DAE: Training
+
    def __preTrainSDAE(self, data, epochs, batchsize, LR=0.01, **algopts):
       '''
       Pretrain network as a stack of Denoising AutoEncoders (sDAE)
       '''
+      # Set Random Weights and Zero Biases
+      self.__setRandomWeights()
+      self.__setZeroBiases()
+         
       # Temp variables
       self.bz = [np.random.random((i)) for i in self.nu]
       
@@ -314,36 +329,169 @@ class DeepNet:
 
       # Verbose
       sys.stdout.write('\n')
+
+
+
+   ####
+   ## Deep Boltzmann Machine
+   ####
+
+   ## DBM: EO-Conditional Probabilities
+   
+   def __cprob_h_EO(self, s):
+      '''
+      Computes the Conditional probabilities of the hidden units given the visible
+      units in even-odd topology.
+      The only difference from a normal RBM is that the hidden and visible layers
+      are not fully connected.
+
+      Arguments:
+        s  Samples
+      '''
+      # Energies of the hidden units
+      E = [np.zeros(n) for n in self.nu]      
+      for l in xrange(self.nl-1):
+         if l % 2 == 0:
+            E[l+1] += np.dot(self.W[l].T,s[l])
+         else:
+            E[l] += np.dot(self.W[l],s[l+1])
+
+      # Conditional probabilities of the hidden units
+      Ph = [np.zeros(n) for n in self.nu]
+      for l in np.arange(1,self.nl,step=2):
+         Ph[l] = sigmoid(E[l] + self.b[l])
+
+      return Ph
+
+
+   def __cprob_v_EO(self, s):
+      '''
+      Computes the Conditional probabilities of the visible units given the hidden
+      units in even-odd topology.
+      The only difference from a normal RBM is that the hidden and visible layers
+      are not fully connected.
+      '''
+      # Energies of the visible units
+      E = [np.zeros(n) for n in self.nu]      
+      for l in xrange(self.nl-1):
+         if l % 2 == 0:
+            E[l]   += np.dot(self.W[l],s[l+1])
+         else:
+            E[l+1] += np.dot(self.W[l].T,s[l])
+
+      # Conditional probabilities of the visible units
+      Pv = [np.zeros(n) for n in self.nu]
+      for l in np.arange(self.nl,step=2):
+         Pv[l] = sigmoid(E[l] + self.b[l])
+
+      return Pv
       
 
+   ## DBM: EO-Gradient Update
+   
+   def __updateGradients_EO(self, d_eo, CDn=1):
+      '''
+      This is a special case of Contrastive Divergence, only used in stage2 of DBM
+      pretraining. This works on even-odd RBMs, in which the visible layer is the
+      concatenation of the even layers and the hidden layer is the concatenation of
+      the odd layers.
+      The only difference wrt a normal RBM is that the visible and the hidden layers
+      are not fully connected.
+
+      Arguments:
+        d    A list of data matrices containing the input samples.
+        CDn  Contrastive divergence order
+      '''
+
+      ## Initial samples
+      # Sample visible layer
+      v0 = [np.array(np.random.rand(len(d)) < d, dtype=int) if d is not None else None for d in d_eo]
+      # Sample hidden layer
+      Ph = self.__cprob_h_EO(d_eo)
+      h0 = [np.array(np.random.rand(len(p)) < p, dtype=int) for p in Ph]
+      
+
+      ## Contrastive divergence
+      h = h0
+      for i in range(CDn):
+         Pv = self.__cprob_v_EO(h)
+         v  = [np.array(np.random.rand(len(p)) < p, dtype=int) for p in Pv]
+         Ph = self.__cprob_h_EO(v)
+         h  = [np.array(np.random.rand(len(p)) < p, dtype=int) for p in Ph]
+         
+      # Update weight gradients
+      for l in range(self.nl-1):
+         if l % 2 == 0:
+            self.dW[l] += np.outer(v0[l], h0[l+1]) - np.outer(v[l], h[l+1])
+         else:
+            self.dW[l] += np.outer(h0[l], v0[l+1]) - np.outer(h[l], v[l+1])
+      
+      # Update bias gradients
+      for l in range(self.nl):
+         if l % 2 == 0:
+            self.db[l] += v0[l] - v[l]
+         else:
+            self.db[l] += h0[l] - h[l]
+
+   ## DBM: Mean-field variational Expectation of the Data distribution (mu)
+   def __variationalExpectation(self, v, iterations=20):
+      mu = [np.zeros(n) for n in self.nu]
+      mu[0] = v.copy()
+
+      for i in xrange(iterations):
+         for l in xrange(1,self.nl):
+            mu[l] = sigmoid(np.dot(self.W[l-1].T, mu[l-1]) +
+                            self.b[l] +
+                            (np.dot(self.W[l],mu[l+1]) if l+1 < self.nl else 0))
+      return mu
+
+   
+   ## DBM: Training (EO algorithm)
+   
    def __preTrainDBM(self, data, epochs, batchsize, LR=0.01, s1_alg='DAE', s1_epochs=None, s1_batchsize=None, s1_LR=None, **algopts):
       '''
       Pretrain network with Kyunghyun Cho's two-stage algorithm
       '''
-
+      # Reset Weights and Biases
+      self.__setZeroWeights()
+      self.__setZeroBiases()
+         
       # Arguments
       s1_epochs = epochs if s1_epochs is None else s1_epochs
       s1_batchsize = batchsize if s1_batchsize is None else s1_batchsize
       s1_LR = LR if s1_LR is None else s1_LR
 
-      ## Stage 1
+      ## Stage 1.1
+      sys.stdout.write('[DBM] stage 1 | alg: {} | epochs: {}\n'.format(s1_alg, s1_epochs))
       # Select layers 0,2,4...
-      even_idx = np.arange(len(self.nu),step=2)
+      even_idx = np.arange(self.nl,step=2)
       even_nu = self.nu[even_idx]
       stage1net = DeepNet(even_nu)
       # Pretrain with s1_alg
       stage1net.preTrain(data, s1_epochs, s1_batchsize, LR=s1_LR, algorithm=s1_alg)
-      # Sample training data
-      tData = [data]
-      for l in range(len(even_nu)-1):
-         tData.append(np.dot(tData[l], stage1net.W[l]))
+
+      ## Stage 1.2
+      sys.stdout.write('[DBM] stage 1 | computing mean-field variational expectation of input data...\n')
+      # Variational Expectation of even layers given the input data.
+      # Computing on all imput samples simultaneously
+      N_data = len(data)
+      V_iters = 100
+
+      mu = [np.random.random((N_data,n)) for n in self.nu]
+      mu[0] = data
+
+      for i in xrange(V_iters):
+         for l in xrange(1,self.nl):
+            mu[l] = sigmoid(np.dot(mu[l-1], self.W[l-1]) +
+                            self.b[l] +
+                            (np.dot(mu[l+1], self.W[l].T) if l+1 < self.nl else 0))
 
       ## Stage 2
       # Train parameters with odd-even RBM (even layers are visible, odd hidden)
       data_idx = np.arange(len(data))
-      d_eo = [None]*len(self.nu)
+      d_eo = [None]*self.nl
       for s1_l, l in enumerate(even_idx):
-         d_eo[l] = tData[s1_l]
+         d_eo[l] = mu[s1_l]
 
       # Train EO RBM
       for e in xrange(epochs):
@@ -373,7 +521,7 @@ class DeepNet:
                sys.stdout.write('\r[pre-train] alg: EO-RBM | epoch: {} | iteration: {}   '.format(e+1, it/batchsize+1))
                sys.stdout.flush()
 
-         # Update weights and biases with last gradient
+               # Update weights and biases with last gradient
          remain = (len(data) % batchsize)
          if remain:
             # Update weights and biases
@@ -383,108 +531,42 @@ class DeepNet:
                W += LR * Wg / float(remain)
 
       # Verbose
-      sys.stdout.write('\n')   
+      sys.stdout.write('\n')
 
-   def preTrain(self, data, epochs, batchsize, algorithm='RBM', **algopts):
-      '''
-      Unsupervised weight pre-training.
-
-      Common options:
-        - LR  Learning rate for stochastic gradient update [0.005]
-
-      Algorithms:
-        - Restricted Boltzmann Machine ('RBM')
-          Layer-wise greedy training.
-          Algorithm options:
-            - CDn Contrastive divergence order [1]
-
-        - Denoising Auto Encoder ('DAE')
-          Layer-wise training of denoising autoencoders.
-          Algorithm options:
-            - noise      Noise type ('mask', 'randomize') ['mask']
-            - noise_p    % of samples affected by noise [0.3]
-            - compute_L  Compute Loss function (True/False) [True]
-      
-      '''
-      if algorithm == 'RBM':
-         self.__preTrainRBM(data, epochs, batchsize, **algopts)
-      elif algorithm == 'DBM':
-         self.__preTrainDBM(data, epochs, batchsize, **algopts)
-      elif algorithm == 'DAE':
-         self.__preTrainSDAE(data, epochs, batchsize, **algopts)
-      else:
-         raise ValueError('unknown algorithm')
-      
-
-   def sampleRepresentation(self, v, N=1):
-
-      ### ERROR WARNING
-      # This way of generating samples from the conditional probability P(h | v) is wrong.
-      # Must use variational inference to estimate P(h | v), sample h given v, then estimate P(v | h)
-      # in the same way and sample v given h.
-      ###
-      
-      '''
-      Computes N sampled iterations of the visible neurons of the RBM.
-      Parameters: 
-        v: Initial value of the visible nodes (nv-dimensional array).
-        N: Number of iterations (consecutive samples)
-      Return value: a matrix containing the original v and one sample per row.
-      '''
-      
-      W1 = self.W[0]
-      W2 = self.W[1]
-      W3 = self.W[2]
-      b0 = self.b[0]
-      b1 = self.b[1]
-      b2 = self.b[2]
-      b3 = self.b[3]
-
-      samples = np.array(v).reshape(1,self.nu[0])
-      for i in range(N):
-         #v = np.array(np.random.rand(self.nu[0]) < v, dtype=int)
-         #h = np.array(np.random.rand(self.nu[self.nl-1]) < self.__cprob(v, 0, self.nl-1), dtype=int)
-         #v = self.__cprob(self.__cprob(v, 0, self.nl-1), self.nl-1, 0)
-         mu1 = np.random.rand(len(b1))
-         mu2 = np.random.rand(len(b2))
-         mu3 = np.random.rand(len(b3))
-         for j in range(20):
-            mu1 = sigmoid(np.dot(W1.T, v) + np.dot(W2, mu2) + b1) 
-            mu2 = sigmoid(np.dot(W2.T, mu1) + np.dot(W3, mu3) + b2) 
-            mu3 = sigmoid(np.dot(W3.T, mu2) + b3) 
-         h1 = np.random.rand(len(b1)) < mu1
-         v = sigmoid(np.dot(W1, h1) + b0)
-         samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
-
-
-      return samples
-
-         
 def main():
    # Load MNIST data
    train, valid, test = mnist_loader.load_data()
    images, digits = train
 
    # Create DeepNet
-   layers = np.array([28*28,300,300,300])
+   layers = np.array([28*28,500,500,1000])
    #layers = np.array([28*28,100,100])
    #layers = np.array([28*28,200])
    deepnet = DeepNet(layers)
 
    # Pre-train DeepNet as DBN
-   deepnet.preTrain(images, epochs=2, batchsize=100, algorithm='DBM', CDn=1, LR=0.1)
+   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='RBM', CDn=1, LR=0.1)
+   deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, s1_epochs=4, s1_LR=0.5, CDn=20)
+   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, CDn=1)
    # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
-   
+
+   # Dump DeepNet
+   with open('mydeepnet.dump', 'w') as f:
+      pickle.dump(obj=deepnet, file=f)
+
+   # with open('mydeepnet.dump') as f:
+   #    mydeepnet = pickle.load(f)
+
    # Sample probabilities
    sample_set = []
    for s in range(10):
-      sample_set.append(deepnet.sampleRepresentation(images[s,:], N=20))
+      sample_set.append(deepnet.generate_DBM(images[s,:], N=20))
    plot_digits(sample_set, fname='digit_probs')
    
    # Random data
    sample_set = []
    for s in range(10):
-      sample_set.append(deepnet.sampleRepresentation(np.random.rand((28*28)), N=20))
+      sample_set.append(deepnet.generate_DBM(np.random.rand((28*28)), N=20))
    plot_digits(sample_set, fname='random_noise')
 
 
