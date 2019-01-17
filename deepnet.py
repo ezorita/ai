@@ -4,7 +4,6 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import mnist_loader
-from sklearn.manifold import TSNE
 
 def plot_digits(m, L=28, fname='digits'):
    samples = len(m)
@@ -58,19 +57,19 @@ class DeepNet:
       if ld < lt:
          # Forward
          for i in xrange(ld,lt,1):
-            cp = sigmoid(-(np.dot(self.W[i].T, cp) + self.b[i+1]))
+            cp = sigmoid(np.dot(self.W[i].T, cp) + self.b[i+1])
       else:
          # Backward
          for i in xrange(ld,lt,-1):
-            cp = sigmoid(-(np.dot(self.W[i-1], cp) + self.b[i-1]))
+            cp = sigmoid(np.dot(self.W[i-1], cp) + self.b[i-1])
             
       return cp
 
    def __resetGradients(self):
-      for bg in self.db:
-         bg.fill(0)
-      for Wg in self.dW:
-         Wg.fill(0)
+      for db in self.db:
+         db.fill(0)
+      for dW in self.dW:
+         dW.fill(0)
       self.L = 0
 
    def __updateGradients_CD(self, d, l, CDn=1):
@@ -157,7 +156,7 @@ class DeepNet:
       # Conditional probabilities of the hidden units
       Ph = [np.zeros(n) for n in self.nu]
       for l in np.arange(1,len(self.nu),step=2):
-         Ph[l] = sigmoid(-(E[l]+self.b[l]))
+         Ph[l] = sigmoid(E[l] + self.b[l])
 
       return Ph
 
@@ -180,7 +179,7 @@ class DeepNet:
       # Conditional probabilities of the visible units
       Pv = [np.zeros(n) for n in self.nu]
       for l in np.arange(len(self.nu),step=2):
-         Pv[l] = sigmoid(-(E[l]+self.b[l]))
+         Pv[l] = sigmoid(E[l] + self.b[l])
 
       return Pv
       
@@ -189,9 +188,9 @@ class DeepNet:
    def __updateGradients_EO(self, d_eo, CDn=1):
       '''
       This is a special case of Contrastive Divergence, only used in stage2 of DBM
-      dbm pretraining. This works on even-odd RBMs, in which the visible layer is
-      the concatenation of the even layers and the hidden layer is the concatenation
-      of the odd layers.
+      pretraining. This works on even-odd RBMs, in which the visible layer is the
+      concatenation of the even layers and the hidden layer is the concatenation of
+      the odd layers.
       The only difference wrt a normal RBM is that the visible and the hidden layers
       are not fully connected.
 
@@ -202,24 +201,24 @@ class DeepNet:
 
       ## Initial samples
       # Sample visible layer
-      v0 = [np.array(np.random.rand(len(d))) < d if d is not None else None for d in d_eo]
+      v0 = [np.array(np.random.rand(len(d)) < d, dtype=int) if d is not None else None for d in d_eo]
       # Sample hidden layer
-      Ph = self.__cprob_h_EO(d_eo)
-      h0 = [np.array(np.random.rand(len(p))) < p if p is not None else None for p in Ph]
+      Ph = self.__cprob_h_EO(d_eo) # <--- Never contains None (has 0-arrays instead).
+      h0 = [np.array(np.random.rand(len(p)) < p, dtype=int) if p is not None else None for p in Ph]
       
 
       ## Contrastive divergence
       h = h0
       for i in range(CDn):
          Pv = self.__cprob_v_EO(h)
-         v  = [np.array(np.random.rand(len(p))) < p if p is not None else None for p in Pv]
+         v  = [np.array(np.random.rand(len(p)) < p, dtype=int) if p is not None else None for p in Pv]
          Ph = self.__cprob_h_EO(v)
-         h  = [np.array(np.random.rand(len(p))) < p if p is not None else None for p in Ph]
+         h  = [np.array(np.random.rand(len(p)) < p, dtype=int) if p is not None else None for p in Ph]
          
       # Update weight gradients
       for l in range(len(self.nu)-1):
          if l % 2 == 0:
-            self.dW[l] += np.outer(v[l],h[l+1]) - np.outer(v0[l],h0[l+1])
+            self.dW[l] += np.outer(v[l], h[l+1]) - np.outer(v0[l], h0[l+1])
          else:
             self.dW[l] += np.outer(h[l], v[l+1]) - np.outer(h0[l], v0[l+1])
       
@@ -432,13 +431,31 @@ class DeepNet:
         N: Number of iterations (consecutive samples)
       Return value: a matrix containing the original v and one sample per row.
       '''
-            
+      
+      W1 = self.W[0]
+      W2 = self.W[1]
+      W3 = self.W[2]
+      b0 = self.b[0]
+      b1 = self.b[1]
+      b2 = self.b[2]
+      b3 = self.b[3]
+
       samples = np.array(v).reshape(1,self.nu[0])
       for i in range(N):
          #v = np.array(np.random.rand(self.nu[0]) < v, dtype=int)
          #h = np.array(np.random.rand(self.nu[self.nl-1]) < self.__cprob(v, 0, self.nl-1), dtype=int)
-         v = self.__cprob(self.__cprob(v, 0, self.nl-1), self.nl-1, 0)
+         #v = self.__cprob(self.__cprob(v, 0, self.nl-1), self.nl-1, 0)
+         mu1 = np.random.rand(len(b1))
+         mu2 = np.random.rand(len(b2))
+         mu3 = np.random.rand(len(b3))
+         for j in range(20):
+            mu1 = sigmoid(np.dot(W1.T, v) + np.dot(W2, mu2) + b1) 
+            mu2 = sigmoid(np.dot(W2.T, mu1) + np.dot(W3, mu3) + b2) 
+            mu3 = sigmoid(np.dot(W3.T, mu2) + b3) 
+         h1 = np.random.rand(len(b1)) < mu1
+         v = sigmoid(np.dot(W1, h1) + b0)
          samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
+
 
       return samples
 
@@ -449,13 +466,13 @@ def main():
    images, digits = train
 
    # Create DeepNet
-   #layers = np.array([28*28,100,100,100])
-   layers = np.array([28*28,100,100])
+   layers = np.array([28*28,300,300,300])
+   #layers = np.array([28*28,100,100])
    #layers = np.array([28*28,200])
    deepnet = DeepNet(layers)
 
    # Pre-train DeepNet as DBN
-   deepnet.preTrain(images, epochs=2, batchsize=100, algorithm='DBM', CDn=1, LR=0.5)
+   deepnet.preTrain(images, epochs=2, batchsize=100, algorithm='DBM', CDn=1, LR=0.1)
    # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
    
    # Sample probabilities
