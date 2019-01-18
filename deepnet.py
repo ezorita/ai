@@ -23,6 +23,23 @@ def plot_digits(m, L=28, fname='digits'):
 def sigmoid(x):
    return 1 / (1 + np.exp(-x))
 
+
+class Particle(list):
+
+   def __init__(self, x):
+      for a in x:
+         self.append(np.random.rand(a))
+
+   def flipUpdate(self, Ph):
+      for l in range(0,len(Ph),2):
+         self[l] = np.array(np.random.rand(len(Ph[l])) < Ph[l], dtype=int)
+
+   def flopUpdate(self, Pv):
+      for l in range(1,len(Pv),2):
+         self[l] = np.array(np.random.rand(len(Pv[l])) < Pv[l], dtype=int)
+
+
+
 class DeepNet:
    '''
    Class Deep Network
@@ -104,6 +121,29 @@ class DeepNet:
          raise ValueError('unknown algorithm')
 
 
+   def fineTune(self, data):
+      '''
+      Shitty prototype GF style that will require much more work
+      to fix than it took to write. You wanted agile programming?
+      Well, you've got it!
+      '''
+
+      particles = [Particle(self.nu) for i in range(100)]
+
+      for it,v in enumerate(data):
+         mu = self.__variationalExpectation(v, iterations=20)
+
+         for p in particles:
+            for iter in range(5):
+               p.flipUpdate(self.__flip(p))
+               p.flopUpdate(self.__flop(p))
+
+         # Update.
+         for l in range(len(self.nu)-1):
+            self.W[l] += 0.005 * (np.outer(mu[l],mu[l+1]) - np.sum([np.outer(p[l],p[l+1]) for p in particles]) / 100)
+            self.b[l] += 0.005 * (mu[l] - np.sum([p[l] for p in particles]) / 100)
+
+
    def generate_RBM(self, v, N=1):
       samples = np.array(v).reshape(1,self.nu[0])
       for i in range(N):
@@ -128,7 +168,7 @@ class DeepNet:
       for i in range(N):
          mu = self.__variationalExpectation(v)
          h1 = np.array(np.random.rand(self.nu[1]) < mu[1], dtype=int)
-         v = sigmoid(np.dot(self.W[0], h1) + b0)
+         v = sigmoid(np.dot(self.W[0], h1) + self.b[0])
          samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
 
       return samples
@@ -338,7 +378,7 @@ class DeepNet:
 
    ## DBM: EO-Conditional Probabilities
    
-   def __cprob_h_EO(self, s):
+   def __flip(self, s):
       '''
       Computes the Conditional probabilities of the hidden units given the visible
       units in even-odd topology.
@@ -364,7 +404,7 @@ class DeepNet:
       return Ph
 
 
-   def __cprob_v_EO(self, s):
+   def __flop(self, s):
       '''
       Computes the Conditional probabilities of the visible units given the hidden
       units in even-odd topology.
@@ -539,23 +579,25 @@ def main():
    images, digits = train
 
    # Create DeepNet
-   layers = np.array([28*28,500,500,1000])
+   #layers = np.array([28*28,300,300,300]) <--- loaded DBM.
    #layers = np.array([28*28,100,100])
    #layers = np.array([28*28,200])
-   deepnet = DeepNet(layers)
+   #deepnet = DeepNet(layers)
 
    # Pre-train DeepNet as DBN
    #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='RBM', CDn=1, LR=0.1)
-   deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, s1_epochs=4, s1_LR=0.5, CDn=20)
+   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, s1_epochs=4, s1_LR=0.5, CDn=20)
    #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, CDn=1)
    # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
 
    # Dump DeepNet
-   with open('mydeepnet.dump', 'w') as f:
-      pickle.dump(obj=deepnet, file=f)
+   #with open('mydeepnet.dump', 'w') as f:
+   #   pickle.dump(obj=deepnet, file=f)
 
-   # with open('mydeepnet.dump') as f:
-   #    mydeepnet = pickle.load(f)
+   with open('mydeepnet.dump') as f:
+      deepnet = pickle.load(f)
+
+   deepnet.fineTune(images)
 
    # Sample probabilities
    sample_set = []
