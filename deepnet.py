@@ -115,7 +115,7 @@ class DeepNet:
       return samples
       
 
-   def generate_DBM(self, d, N=1):
+   def generate_DBM(self, d, N=1, step=1, **vexpargs):
       '''
       Computes N sampled iterations of the visible neurons of the RBM.
       Parameters: 
@@ -125,11 +125,12 @@ class DeepNet:
       '''
       v = d.copy()
       samples = np.array(v).reshape(1,self.nu[0])
-      for i in range(N):
-         mu = self.__variationalExpectation(v)
+      for i in range(N*step):
+         mu = self.__variationalExpectation(v, **vexpargs)
          h1 = np.array(np.random.rand(self.nu[1]) < mu[1], dtype=int)
-         v = sigmoid(np.dot(self.W[0], h1) + b0)
-         samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
+         v = sigmoid(np.dot(self.W[0], h1) + self.b[0])
+         if i % step == 0:
+            samples = np.concatenate((samples, np.array(v).reshape((1,self.nu[0]))), axis=0)
 
       return samples
 
@@ -193,7 +194,7 @@ class DeepNet:
 
    ## RBM: Training
    
-   def __preTrainRBM(self, data, epochs, batchsize, LR=0.01, **algopts):
+   def __preTrainRBN(self, data, epochs, batchsize, LR=0.01, **algopts):
       '''
       Pretrain neural network using RBM algorithm (Contrastive Divergence)
       '''
@@ -222,7 +223,7 @@ class DeepNet:
                   # Reset gradient estimates
                   self.__resetGradients()
                   # Verbose
-                  sys.stdout.write('\r[pre-train] alg: DBN | layer: {} | epoch: {} | iteration: {}   '.format(layer+1, e+1, it/batchsize+1))
+                  sys.stdout.write('\r[pre-train] alg: RBN | layer: {} | epoch: {} | iteration: {}   '.format(layer+1, e+1, it/batchsize+1))
                   sys.stdout.flush()
 
             # Update weights and biases with last gradient
@@ -434,15 +435,15 @@ class DeepNet:
             self.db[l] += h0[l] - h[l]
 
    ## DBM: Mean-field variational Expectation of the Data distribution (mu)
-   def __variationalExpectation(self, v, iterations=20):
+   def __variationalExpectation(self, v, iterations=20, temp=1.0):
       mu = [np.zeros(n) for n in self.nu]
       mu[0] = v.copy()
 
       for i in xrange(iterations):
          for l in xrange(1,self.nl):
-            mu[l] = sigmoid(np.dot(self.W[l-1].T, mu[l-1]) +
-                            self.b[l] +
-                            (np.dot(self.W[l],mu[l+1]) if l+1 < self.nl else 0))
+            mu[l] = sigmoid(1.0/temp*(np.dot(self.W[l-1].T, mu[l-1]) +
+                                      self.b[l] +
+                                      (np.dot(self.W[l],mu[l+1]) if l+1 < self.nl else 0)))
       return mu
 
    
@@ -533,21 +534,23 @@ class DeepNet:
       # Verbose
       sys.stdout.write('\n')
 
+
+
 def main():
    # Load MNIST data
    train, valid, test = mnist_loader.load_data()
    images, digits = train
 
    # Create DeepNet
-   layers = np.array([28*28,500,500,1000])
+   layers = np.array([28*28,300,300,300])
    #layers = np.array([28*28,100,100])
    #layers = np.array([28*28,200])
    deepnet = DeepNet(layers)
 
-   # Pre-train DeepNet as DBN
-   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='RBM', CDn=1, LR=0.1)
+   # Pre-train DeepNet
+   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, s1_alg='RBM', s1_epochs=4, s1_LR=0.5, CDn=20)
    deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, s1_epochs=4, s1_LR=0.5, CDn=20)
-   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, CDn=1)
+   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='RBM', CDn=1, LR=0.1)
    # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
 
    # Dump DeepNet
@@ -555,19 +558,27 @@ def main():
       pickle.dump(obj=deepnet, file=f)
 
    # with open('mydeepnet.dump') as f:
-   #    mydeepnet = pickle.load(f)
+   #   deepnet = pickle.load(f)
 
-   # Sample probabilities
+   # Generate samples from numbers
    sample_set = []
-   for s in range(10):
-      sample_set.append(deepnet.generate_DBM(images[s,:], N=20))
-   plot_digits(sample_set, fname='digit_probs')
-   
+   for s in range(20):
+      sample_set.append(deepnet.generate_DBM(images[s,:], N=40, step=1, temp=1))
+   plot_digits(sample_set, fname='samples_from_digits')
+
+   # Generate samples from half numbers
+   sample_set = []
+   mask = np.zeros((28,28))
+   mask[:,14:28] = 1
+   for s in range(20):
+      sample_set.append(deepnet.generate_DBM((images[s,:].reshape((28,28)) * mask).reshape(28*28), N=40, step=10))
+   plot_digits(sample_set, fname='samples_from_half_digits')
+
    # Random data
    sample_set = []
-   for s in range(10):
-      sample_set.append(deepnet.generate_DBM(np.random.rand((28*28)), N=20))
-   plot_digits(sample_set, fname='random_noise')
+   for s in range(20):
+      sample_set.append(deepnet.generate_DBM(np.random.rand((28*28)), N=40, step=10))
+   plot_digits(sample_set, fname='samples_from_random_noise')
 
 
 if __name__ == '__main__':
