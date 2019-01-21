@@ -154,7 +154,7 @@ class DeepNet:
       Well, you've got it!
       '''
 
-      data0 = self.__variationalExpectation(v0)
+      data0 = self.__variationalExpectation(np.random.random(v0.shape))
 
       particles = [Particle(self.nu, self, data0) for i in range(n_particles)]
 
@@ -285,7 +285,7 @@ class DeepNet:
 
    ## RBM: Training
    
-   def __preTrainRBN(self, data, epochs, batchsize, LR=0.01, **algopts):
+   def __preTrainRBM(self, data, epochs, batchsize, LR=0.01, **algopts):
       '''
       Pretrain neural network using RBM algorithm (Contrastive Divergence)
       '''
@@ -314,7 +314,7 @@ class DeepNet:
                   # Reset gradient estimates
                   self.__resetGradients()
                   # Verbose
-                  sys.stdout.write('\r[pre-train] alg: RBN | layer: {} | epoch: {} | iteration: {}   '.format(layer+1, e+1, it/batchsize+1))
+                  sys.stdout.write('\r[pre-train] alg: DBN | layer: {} | epoch: {} | iteration: {}   '.format(layer+1, e+1, it/batchsize+1))
                   sys.stdout.flush()
 
             # Update weights and biases with last gradient
@@ -647,13 +647,13 @@ def main():
    #Dump DeepNet
    # with open('mydeepnet.dump', 'w') as f:
    #    pickle.dump(obj=deepnet, file=f)
+  
 
-   
-
-   with open('mydeepnet.dump') as f:
+   #   with open('dbm_200_200_200_200_s1-DAE-4e_s2-RBM-10e.dump') as f:
+   with open('dbm_finetune_it49500.dump') as f:
       deepnet = pickle.load(f)
 
-   # deepnet.fineTune(images, v0=images[0])
+   #deepnet.fineTune(images, v0=images[0])
 
    # Generate samples from numbers
    sample_set = []
