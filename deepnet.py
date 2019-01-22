@@ -28,15 +28,13 @@ def sigmoid(x):
 
 class Particle(list):
 
-   def __init__(self, x, dnet, data0, init_iters=100):#10000):
+   def __init__(self, x, dnet, data0, init_iters=100):
       self.dnet = dnet
       self.extend(data0)
       for i in xrange(init_iters):
          self.flipUpdate()
          self.flopUpdate()
 
-      print self
-         
    def flipUpdate(self):
       Ph = self.dnet._DeepNet__flip(self)
       for l in range(1,len(Ph),2):
@@ -53,19 +51,25 @@ def iterateParticles_MP(particles, iterations=5):
          particle.flipUpdate()
          particle.flopUpdate()
 
-def variationalExpectation_MP(dnet, data, queue, iterations=20, temp=1.0):
+def variationalExpectation_MP(dnet, data, queue, max_iters=10000, tol=1e-2,temp=1.0):
    mu = [np.zeros(n) for n in dnet.nu]
    mu[0] = data.copy()
+   prev_mu = [x.copy() for x in mu]
 
-   for i in xrange(iterations):
+   for i in xrange(max_iters):
       for l in xrange(1,dnet.nl):
          mu[l] = sigmoid(1.0/temp*(np.dot(dnet.W[l-1].T, mu[l-1]) +
                                    dnet.b[l] +
                                    (np.dot(dnet.W[l],mu[l+1]) if l+1 < dnet.nl else 0)))
+      if np.max([np.max(np.abs(x)) for x in prev_mu[1:]]) < tol:
+         break
+
+      prev_mu = [x.copy() for x in mu]
+
    # Push to queue
    queue.put(mu)
 
-
+   
 class DeepNet:
    '''
    Class Deep Network
@@ -146,15 +150,46 @@ class DeepNet:
       else:
          raise ValueError('unknown algorithm')
 
-
-   def fineTune(self, data, v0, n_particles=100, flip_iters=100, ve_iters=20, LR=0.005, cpus=16):
+   def FS_fineTune(self, data, n_particles=100, flip_iters=100, LR=0.005, cpus=16):
       '''
       Shitty prototype GF style that will require much more work
       to fix than it took to write. You wanted agile programming?
       Well, you've got it!
       '''
 
-      data0 = self.__variationalExpectation(np.random.random(v0.shape))
+      data0 = self.__variationalExpectation(np.random.random(self.nu[0]))
+
+      particles = [Particle(self.nu, self, data0) for i in range(n_particles)]
+
+      for it,v in enumerate(data):
+         print it
+         mu = self.__variationalExpectation(v)
+
+         # Parallel flip-flop particle iteration
+         for i in range(flip_iters):
+            for p in particles:
+               p.flipUpdate()
+               p.flopUpdate()
+               
+         # Update.
+         for l in range(self.nl-1):
+            self.W[l] += LR * (np.outer(mu[l],mu[l+1]) - np.mean([np.outer(p[l],p[l+1]) for p in particles],axis=0))
+         for l in xrange(self.nl):
+            self.b[l] += LR * (mu[l] - np.mean([p[l] for p in particles],axis=0))
+
+         if it % 500 == 0:
+            with open('dbm_finetune_it{}.dump'.format(it), 'w') as f:
+               pickle.dump(self, file=f)
+
+
+   def fineTune(self, data, n_particles=100, flip_iters=100, LR=0.005, cpus=16):
+      '''
+      Shitty prototype GF style that will require much more work
+      to fix than it took to write. You wanted agile programming?
+      Well, you've got it!
+      '''
+
+      data0 = self.__variationalExpectation(np.random.random(self.nu[0]))
 
       particles = [Particle(self.nu, self, data0) for i in range(n_particles)]
 
@@ -166,7 +201,7 @@ class DeepNet:
          
          # Variational Expectation Process
          mu_q = multiprocessing.Queue(1)
-         p = multiprocessing.Process(target=variationalExpectation_MP, kwargs={'dnet': self, 'data': v, 'queue': mu_q, 'iterations': ve_iters})
+         p = multiprocessing.Process(target=variationalExpectation_MP, kwargs={'dnet': self, 'data': v, 'queue': mu_q})
          procs.append(p)
          p.start()
 
@@ -186,9 +221,9 @@ class DeepNet:
 
          # Update.
          for l in range(self.nl-1):
-            self.W[l] += LR * (np.outer(mu[l],mu[l+1]) - np.sum([np.outer(p[l],p[l+1]) for p in particles],axis=0) / n_particles)
+            self.W[l] += LR * (np.outer(mu[l],mu[l+1]) - np.mean([np.outer(p[l],p[l+1]) for p in particles],axis=0))
          for l in xrange(self.nl):
-            self.b[l] += LR * (mu[l] - np.sum([p[l] for p in particles],axis=0) / n_particles)
+            self.b[l] += LR * (mu[l] - np.mean([p[l] for p in particles],axis=0))
 
          if it % 500 == 0:
             with open('dbm_finetune_it{}.dump'.format(it), 'w') as f:
@@ -526,15 +561,24 @@ class DeepNet:
             self.db[l] += h0[l] - h[l]
 
    ## DBM: Mean-field variational Expectation of the Data distribution (mu)
-   def __variationalExpectation(self, v, iterations=20, temp=1.0):
+   def __variationalExpectation(self, v, tol=1e-3, temp=1.0):
       mu = [np.zeros(n) for n in self.nu]
       mu[0] = v.copy()
+      prev_mu = [x.copy() for x in mu]
 
-      for i in xrange(iterations):
+      for i in xrange(10000):
          for l in xrange(1,self.nl):
             mu[l] = sigmoid(1.0/temp*(np.dot(self.W[l-1].T, mu[l-1]) +
                                       self.b[l] +
                                       (np.dot(self.W[l],mu[l+1]) if l+1 < self.nl else 0)))
+            prev_mu[l] -= mu[l]
+            
+         if np.max([np.max(np.abs(x)) for x in prev_mu[1:]]) < tol:
+            break
+
+         prev_mu = [x.copy() for x in mu]
+
+      print 'VE_its',i
       return mu
 
    
@@ -569,14 +613,14 @@ class DeepNet:
       N_data = len(data)
       V_iters = 100
 
-      mu = [np.random.random((N_data,n)) for n in self.nu]
+      mu = [np.random.random((N_data,n)) for n in even_nu]
       mu[0] = data
 
       for i in xrange(V_iters):
-         for l in xrange(1,self.nl):
-            mu[l] = sigmoid(np.dot(mu[l-1], self.W[l-1]) +
-                            self.b[l] +
-                            (np.dot(mu[l+1], self.W[l].T) if l+1 < self.nl else 0))
+         for l in xrange(1,len(even_nu)):
+            mu[l] = sigmoid(np.dot(mu[l-1], stage1net.W[l-1]) +
+                            stage1net.b[l] +
+                            (np.dot(mu[l+1], stage1net.W[l].T) if l+1 < len(even_nu) else 0))
 
       ## Stage 2
       # Train parameters with odd-even RBM (even layers are visible, odd hidden)
@@ -633,28 +677,31 @@ def main():
    images, digits = train
 
    # Create DeepNet
-   layers = np.array([28*28,200,200,200,200])
-   #layers = np.array([28*28,100,100])
-   #layers = np.array([28*28,200])
-#   deepnet = DeepNet(layers)
+   # layers = np.array([28*28,200,200,200])
+   # #layers = np.array([28*28,100,100])
+   # #layers = np.array([28*28,200])
+   # deepnet = DeepNet(layers)
 
-   # Pre-train DeepNet as DBN
-   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='RBM', CDn=1, LR=0.1)
-#   deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, s1_epochs=4, s1_LR=0.5, CDn=20)
-   #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, CDn=1)
-   # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
+   # # Pre-train DeepNet as DBN
+   # #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='RBM', CDn=1, LR=0.1)
+   # net_name = 'dbm_200_200_200_pretrain_2step_SDAE-4e-LR05_RBM-10e-LR01-CDn20.dump'
+   # deepnet.preTrain(images, epochs=4, batchsize=100, algorithm='DBM', LR=0.1, s1_epochs=2, s1_LR=0.5, CDn=20)
+   # #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, CDn=1)
+   # # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
 
-   #Dump DeepNet
-   # with open('mydeepnet.dump', 'w') as f:
+   # #Dump DeepNet
+   # with open(net_name, 'w') as f:
    #    pickle.dump(obj=deepnet, file=f)
-  
 
-   #   with open('dbm_200_200_200_200_s1-DAE-4e_s2-RBM-10e.dump') as f:
-   with open('dbm_finetune_it49500.dump') as f:
+
+   with open('dbm_200_200_200_pretrain_2step_SDAE-4e-LR05_RBM-10e-LR01-CDn20.dump') as f:
       deepnet = pickle.load(f)
 
-   #deepnet.fineTune(images, v0=images[0])
+   deepnet.FS_fineTune(images)
+   #   deepnet.fineTune(images)
 
+   # with open('dbm_finetune_it500.dump') as f:
+   #    deepnet = pickle.load(f)         
    # Generate samples from numbers
    sample_set = []
    for s in range(20):
