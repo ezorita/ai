@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import time
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,31 +25,16 @@ def plot_digits(m, L=28, fname='digits'):
 def sigmoid(x):
    return 1 / (1 + np.exp(-x))
 
-
-class Particle(list):
-
-   def __init__(self, x, dnet, data0, init_iters=100):
-      self.dnet = dnet
-      self.extend(data0)
-      for i in xrange(init_iters):
-         self.flipUpdate()
-         self.flopUpdate()
-
-   def flipUpdate(self):
-      Ph = self.dnet._DeepNet__flip(self)
-      for l in range(1,len(Ph),2):
-         self[l] = np.array(np.random.random(len(Ph[l])) < Ph[l], dtype=int)
-
-   def flopUpdate(self):
-      Pv = self.dnet._DeepNet__flop(self)
-      for l in range(0,len(Pv),2):
-         self[l] = np.array(np.random.random(len(Pv[l])) < Pv[l], dtype=int)
-
-def iterateParticles_MP(particles, iterations=5):
-   for particle in particles:
+def iterateParticles_MP(particles, dnet, iterations=5):
+   for p in particles:
       for iter in xrange(iterations):
-         particle.flipUpdate()
-         particle.flopUpdate()
+         # Flip flop
+         Ph = dnet._DeepNet__flip(p)
+         for l in range(1,len(Ph),2):
+            p[l] = np.array(np.random.random(len(Ph[l])) < Ph[l], dtype=int)
+         Pv = dnet._DeepNet__flop(p)
+         for l in range(0,len(Pv),2):
+            p[l] = np.array(np.random.random(len(Pv[l])) < Pv[l], dtype=int)
 
 def variationalExpectation_MP(dnet, data, queue, max_iters=10000, tol=1e-2,temp=1.0):
    mu = [np.zeros(n) for n in dnet.nu]
@@ -150,56 +135,64 @@ class DeepNet:
       else:
          raise ValueError('unknown algorithm')
 
-   def FS_fineTune(self, data, n_particles=100, flip_iters=100, LR=0.005, cpus=16):
+   def fineTune(self, data, n_particles=100, flip_iters=5, LR=0.005):
       '''
       Shitty prototype GF style that will require much more work
       to fix than it took to write. You wanted agile programming?
       Well, you've got it!
       '''
 
-      data0 = self.__variationalExpectation(np.random.random(self.nu[0]))
-
-      particles = [Particle(self.nu, self, data0) for i in range(n_particles)]
-
+      particles = [[np.random.random(nu) for nu in self.nu] for i in xrange(n_particles)]
+      its = len(data)
       for it,v in enumerate(data):
          print it
+
+         # Variational Expectation of training sample
          mu = self.__variationalExpectation(v)
 
-         # Parallel flip-flop particle iteration
-         for i in range(flip_iters):
-            for p in particles:
-               p.flipUpdate()
-               p.flopUpdate()
-               
-         # Update.
-         for l in range(self.nl-1):
-            self.W[l] += LR * (np.outer(mu[l],mu[l+1]) - np.mean([np.outer(p[l],p[l+1]) for p in particles],axis=0))
-         for l in xrange(self.nl):
-            self.b[l] += LR * (mu[l] - np.mean([p[l] for p in particles],axis=0))
+         if it % 100 == 0:
+            particles.pop()
+            particles.insert(0,[np.random.random(nu) for nu in self.nu])
 
-         if it % 500 == 0:
-            with open('dbm_finetune_it{}.dump'.format(it), 'w') as f:
+         # Parallel flip-flop particle iteration
+         for p in particles:
+            for i in range(flip_iters):
+               # Flip flop
+               Ph = self.__flip(p)
+               for l in range(1,len(Ph),2):
+                  p[l] = np.array(np.random.random(len(Ph[l])) < Ph[l], dtype=int)
+               Pv = self.__flop(p)
+               for l in range(0,len(Pv),2):
+                  p[l] = np.array(np.random.random(len(Pv[l])) < Pv[l], dtype=int)
+               
+         # Update. (Decreasing Learning Rate)
+         LRf = (its-it)*LR/its
+         for l in range(self.nl-1):
+            self.W[l] += LRf * (np.outer(mu[l],mu[l+1]) - np.mean([np.outer(p[l],p[l+1]) for p in particles],axis=0))
+         for l in xrange(self.nl):
+            self.b[l] += LRf * (mu[l] - np.mean([p[l] for p in particles],axis=0))
+
+         if it % 1000 == 0:
+            with open('dbm_new_finetune_it{}.dump'.format(it), 'w') as f:
                pickle.dump(self, file=f)
 
 
-   def fineTune(self, data, n_particles=100, flip_iters=100, LR=0.005, cpus=16):
+   def fineTune_MT(self, data, n_particles=100, flip_iters=10, LR=0.005, cpus=16):
       '''
       Shitty prototype GF style that will require much more work
       to fix than it took to write. You wanted agile programming?
       Well, you've got it!
       '''
+      particles = [[np.random.random(nu) for nu in self.nu] for i in xrange(n_particles)]
 
-      data0 = self.__variationalExpectation(np.random.random(self.nu[0]))
-
-      particles = [Particle(self.nu, self, data0) for i in range(n_particles)]
-
+      its = len(data)
       for it,v in enumerate(data):
          print it
 
          # Iteration
          procs = []
          
-         # Variational Expectation Process
+         # Variational Expectation of traing Sample
          mu_q = multiprocessing.Queue(1)
          p = multiprocessing.Process(target=variationalExpectation_MP, kwargs={'dnet': self, 'data': v, 'queue': mu_q})
          procs.append(p)
@@ -210,7 +203,7 @@ class DeepNet:
          particle_groups = [particles[(cpus*i):(cpus*(i+1))] for i in xrange(0, len(particles), n_procs)]
 
          for p_group in particle_groups:
-            p = multiprocessing.Process(target=iterateParticles_MP, kwargs={'particles': p_group, 'iterations': flip_iters})
+            p = multiprocessing.Process(target=iterateParticles_MP, kwargs={'dnet': self, 'particles': p_group, 'iterations': flip_iters})
             procs.append(p)
             p.start()
 
@@ -219,17 +212,54 @@ class DeepNet:
             p.join()
          mu = mu_q.get()
 
-         # Update.
+         # Update (decreasing learning rate)
+         LRf = (its-it)*LR/its
          for l in range(self.nl-1):
-            self.W[l] += LR * (np.outer(mu[l],mu[l+1]) - np.mean([np.outer(p[l],p[l+1]) for p in particles],axis=0))
+            self.W[l] += LRf * (np.outer(mu[l],mu[l+1]) - np.mean([np.outer(p[l],p[l+1]) for p in particles],axis=0))
          for l in xrange(self.nl):
-            self.b[l] += LR * (mu[l] - np.mean([p[l] for p in particles],axis=0))
-
-         if it % 500 == 0:
-            with open('dbm_finetune_it{}.dump'.format(it), 'w') as f:
+            self.b[l] += LRf * (mu[l] - np.mean([p[l] for p in particles],axis=0))
+            
+         if it % 1000 == 0:
+            with open('dbm_new_finetune_MT_it{}.dump'.format(it), 'w') as f:
                pickle.dump(self, file=f)
 
+               
+   def fineTune_sDAE(self, data, epochs=1, batchsize=100, LR=0.005, **algopts):
+      # For epoch
+      for e in xrange(epochs):
+         # Reset Gradients
+         self.__resetGradients()
+         # Reshuffle input data
+         np.random.shuffle(data)
+         for it, d in enumerate(data):
+            # Update gradient estimates
+            self.__updateGradients_sDAE_BP(d, **algopts)
+            # End of batch
+            if it % batchsize == 0:
+               # Update weights and biases
+               for b, db in zip(self.b, self.db):
+                  b -= LR * db / float(batchsize)
+               for W, dW in zip(self.W, self.dW):
+                  W -= LR * dW / float(batchsize)
+               # Update loss function as mean loss
+               L = self.L / float(batchsize)
+               # Reset gradient estimates
+               self.__resetGradients()
+               # Verbose
+               sys.stdout.write('\r[fine-tune] alg: sDAE-BP | epoch: {} | iteration: {} | Loss: {}       '.format(e+1, it/batchsize+1, L))
+               sys.stdout.flush()
+         # Update weights and biases with last gradient
+         remain = (len(data) % batchsize)
+         if remain:
+            # Update weights and biases
+            for b, db in zip(self.b, self.db):
+               b -= LR * db / float(remain)
+            for W, dW in zip(self.W, self.dW):
+               W -= LR * dW / float(remain)
 
+      # Verbose
+      sys.stdout.write('\n')
+               
    def generate_RBM(self, v, N=1):
       samples = np.array(v).reshape(1,self.nu[0])
       for i in range(N):
@@ -260,7 +290,17 @@ class DeepNet:
 
       return samples
 
+   def totalEnergy(self, x):
+      # x is the current state of the machine. Format: [x,h1,h2,h3,...]
+      # E = -x.T*W*h - x.T*b_x - h.T*b_h
+      E = 0
+      for l in xrange(self.nl):
+         E -= (np.dot(np.dot(x[l].T, self.W[l]), x[l+1]) if l < self.nl-1 else 0)
+         E -= np.inner(x[l], self.b[l]) 
 
+      return E
+
+   
    ####
    ## Restricted Boltzmann Machine
    ####
@@ -369,6 +409,112 @@ class DeepNet:
    ## Denoising AutoEncoder
    ####
 
+   ## sDAE: Fine-tune Gradient Update
+
+   def __updateGradients_sDAE_BP(self, d, noise='mask', noise_p=0.3, compute_L=True):
+
+      # Initialize units
+      W = [None]*(self.nl*2-2)
+      dW = [None]*(self.nl*2-2)
+      b = [None]*(self.nl*2-1)
+      db = [None]*(self.nl*2-1)
+      y = [None]*(self.nl*2-1)
+
+      # Add noise to training sample
+      _x = d.copy()
+      noise_sz = int(len(_x)*noise_p)
+      if noise == 'mask':
+         _x[np.random.choice(np.arange(len(_x)), size=noise_sz)] = 0
+      elif noise == 'randomize':
+         _x[np.random.choice(np.arange(len(_x)), size=noise_sz)] = np.random.rand(noise_sz)
+      
+      y[0] = _x
+
+      # Extend encoder-decoder structure
+      for i in np.arange(self.nl-1):
+         W[i] = self.W[i]
+         W[self.nl*2-3-i] = self.W[i].T
+
+      for i in np.arange(self.nl):
+         b[i] = self.b[i]
+         b[self.nl*2-2-i] = self.b[i]
+
+      # Status of Units
+      for i in np.arange(1,self.nl*2-1):
+         y[i] = sigmoid(np.dot(y[i-1], W[i-1]) + b[i])
+
+      # Gradients
+      l = self.nl*2-2
+      delta = y[-1]*(1-d)-d*(1-y[-1])
+      db[l] = delta
+      for l in np.arange(l, 0, -1):
+         dW[l-1] = np.outer(y[l-1], delta)
+         delta = np.dot(W[l-1], delta) * y[l-1] * (1-y[l-1])
+         db[l-1] = delta
+
+      # Combine gradients
+      for i in np.arange(self.nl-1):
+         self.dW[i] = dW[i] + dW[self.nl*2-3-i].T
+
+      for i in np.arange(self.nl):
+         self.db[i] = db[i] + db[self.nl*2-2-i]
+
+      # Loss Function
+      if compute_L:
+         self.L += -np.sum(d*np.log(y[-1]) + (1-d)*np.log(1-y[-1]))
+
+      
+   
+   def __updateGradients_sDAE(self, d, noise='mask', noise_p=0.3, compute_L=True):
+      # Initialize units
+      y = [None]*(self.nl*2-1)
+      
+      # Add noise to training sample
+      _x = d.copy()
+      noise_sz = int(len(_x)*noise_p)
+      if noise == 'mask':
+         _x[np.random.choice(np.arange(len(_x)), size=noise_sz)] = 0
+      elif noise == 'randomize':
+         _x[np.random.choice(np.arange(len(_x)), size=noise_sz)] = np.random.rand(noise_sz)
+      
+      y[0] = _x
+
+      ## Unit status
+      # Compute Encoder units
+      l = 1
+      for i in np.arange(self.nl-1):
+         y[l] = sigmoid(np.dot(y[l-1],self.W[i]) + self.b[i+1])
+         l += 1
+
+      # Compute Decoder units
+      for i in np.arange(self.nl-2,-1,step=-1):
+         y[l] = sigmoid(np.dot(self.W[i],y[l-1]) + self.b[i])
+         l += 1
+
+      # Gradients (backpropagation)
+      l = len(y)-1
+      delta = y[-1]*(1-d) - d*(1-y[-1])
+      
+      # Backpropagate in Decoder
+      for i in np.arange(self.nl-1):
+         self.db[i] += delta
+         self.dW[i] += np.outer(delta, y[l-1])
+         delta = np.dot(delta, self.W[i]) * y[l-1] * (1-y[l-1])
+         l -= 1
+
+      # Backpropagate in Encoder
+      for i in np.arange(self.nl-2,-1,step=-1):
+         self.db[i+1] += delta
+         self.dW[i] += np.outer(y[l-1], delta)
+         delta = np.dot(self.W[i], delta) * y[l-1] * (1-y[l-1])
+         l -= 1
+
+      self.db[0] += delta
+
+      # Loss Function
+      if compute_L:
+         self.L += -np.sum(d*np.log(y[-1]) + (1-d)*np.log(1-y[-1]))
+      
    ## DAE: Gradient Update
    
    def __updateGradients_DAE(self, d, l, noise='mask', noise_p=0.3, compute_L=True):
@@ -465,7 +611,7 @@ class DeepNet:
 
    ## DBM: EO-Conditional Probabilities
    
-   def __flip(self, s):
+   def __flip(self, s, beta=1.0):
       '''
       Computes the Conditional probabilities of the hidden units given the visible
       units in even-odd topology.
@@ -486,12 +632,12 @@ class DeepNet:
       # Conditional probabilities of the hidden units
       Ph = [np.zeros(n) for n in self.nu]
       for l in np.arange(1,self.nl,step=2):
-         Ph[l] = sigmoid(E[l] + self.b[l])
+         Ph[l] = sigmoid(beta*(E[l] + self.b[l]))
 
       return Ph
 
 
-   def __flop(self, s):
+   def __flop(self, s, beta=1.0):
       '''
       Computes the Conditional probabilities of the visible units given the hidden
       units in even-odd topology.
@@ -509,7 +655,7 @@ class DeepNet:
       # Conditional probabilities of the visible units
       Pv = [np.zeros(n) for n in self.nu]
       for l in np.arange(self.nl,step=2):
-         Pv[l] = sigmoid(E[l] + self.b[l])
+         Pv[l] = sigmoid(beta*(E[l] + self.b[l]))
 
       return Pv
       
@@ -578,7 +724,6 @@ class DeepNet:
 
          prev_mu = [x.copy() for x in mu]
 
-      print 'VE_its',i
       return mu
 
    
@@ -675,7 +820,64 @@ def main():
    # Load MNIST data
    train, valid, test = mnist_loader.load_data()
    images, digits = train
+   imtest, dtest = test
 
+   # SDAE
+   net_name = 'finetuned_sDAE_200_200_200_pretrain2e_finetune1e'
+   layers = np.array([28*28,1000,500,250,2])
+   deepnet = DeepNet(layers)
+   deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
+   #Dump DeepNet
+   with open('pretrained_sdae_200_200_200.dump', 'w') as f:
+      pickle.dump(obj=deepnet, file=f)
+
+   sample_set = []
+   for s in range(20):
+      sample_set.append(deepnet.generate_DBM(images[s,:], N=40, step=1, temp=1))
+   plot_digits(sample_set, fname='samples_from_digits_pretrained')
+
+   # Loss function (PRETRAIN)
+   ## Unit status
+   # Compute Encoder units
+   x = imtest
+   z = imtest.copy()
+   l = 1
+   for i in np.arange(deepnet.nl-1):
+      z = sigmoid(np.dot(z,deepnet.W[i]) + deepnet.b[i+1])
+      
+   # Compute Decoder units
+   for i in np.arange(deepnet.nl-2,-1,step=-1):
+      z = sigmoid(np.dot(z,deepnet.W[i].T) + deepnet.b[i])
+
+   L_pretrain = -np.sum(x*np.log(z) + (1-x)*np.log(1-z), axis=1)
+      
+   deepnet.fineTune_sDAE(images, epochs=5, batchsize=100, LR=0.5, noise_p=0.5)
+   # #Dump DeepNet
+   with open('finetuned_sdae_200_200_200.dump', 'w') as f:
+      pickle.dump(obj=deepnet, file=f)
+
+   z = imtest.copy()
+   l = 1
+   for i in np.arange(deepnet.nl-1):
+      z = sigmoid(np.dot(z,deepnet.W[i]) + deepnet.b[i+1])
+      
+   # Compute Decoder units
+   for i in np.arange(deepnet.nl-2,-1,step=-1):
+      z = sigmoid(np.dot(z,deepnet.W[i].T) + deepnet.b[i])
+
+   L_finetune = -np.sum(x*np.log(z) + (1-x)*np.log(1-z), axis=1)
+
+   print np.mean(L_pretrain)
+   print np.mean(L_finetune)
+
+
+   sample_set = []
+   for s in range(20):
+      sample_set.append(deepnet.generate_DBM(images[s,:], N=40, step=1, temp=1))
+   plot_digits(sample_set, fname='samples_from_digits_finetuned')
+
+
+   sys.exit(0)
    # Create DeepNet
    # layers = np.array([28*28,200,200,200])
    # #layers = np.array([28*28,100,100])
@@ -689,18 +891,13 @@ def main():
    # #deepnet.preTrain(images, epochs=10, batchsize=100, algorithm='DBM', LR=0.1, CDn=1)
    # # deepnet.preTrain(images, epochs=3, batchsize=100, algorithm='DAE', LR=0.05, noise_p=0.5)
 
-   # #Dump DeepNet
-   # with open(net_name, 'w') as f:
-   #    pickle.dump(obj=deepnet, file=f)
+   # with open('dbm_200_200_200_pretrain_2step_SDAE-4e-LR05_RBM-10e-LR01-CDn20.dump') as f:
+   #    deepnet = pickle.load(f)
 
-
-   with open('dbm_200_200_200_pretrain_2step_SDAE-4e-LR05_RBM-10e-LR01-CDn20.dump') as f:
-      deepnet = pickle.load(f)
-
-   deepnet.FS_fineTune(images)
+   # deepnet.fineTune(images)
    #   deepnet.fineTune(images)
 
-   # with open('dbm_finetune_it500.dump') as f:
+   # with open('dbm_new_finetune_it49000.dump') as f:
    #    deepnet = pickle.load(f)         
    # Generate samples from numbers
    sample_set = []
