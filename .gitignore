@@ -1,3 +1,4 @@
 *.pyc
-*.png
 *.dump
+*.torch
+uwan/MNIST/MNIST

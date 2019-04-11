@@ -21,31 +21,28 @@ class WULayer(nn.Module):
       self.dev = device if device is not None else 'cuda' if torch.cuda.is_available() else 'cpu'
       self.dtype = torch.float32 if self.dev == 'cpu' else dtype
 
-      print('WULayer dtype: {}'.format(self.dtype))
-
       # Initialize parameters
       self.mu = nn.Parameter(torch.zeros((output_size,input_size), dtype=self.dtype, device=self.dev))
       self.ro = nn.Parameter(torch.log(torch.exp(1.5*torch.ones((output_size, input_size), dtype=self.dtype, device=self.dev)/np.sqrt(output_size))-1))
       self.b  = nn.Parameter(torch.zeros(output_size, dtype=self.dtype, device=self.dev))
+      self.W  = torch.zeros((output_size,input_size), dtype=self.dtype, device=self.dev)
 
-   def getWeights(self):
+   def sampleWeights(self):
       sd = torch.log(1+torch.exp(self.ro))
       W  = torch.randn(self.mu.shape, dtype=self.dtype, device=self.dev) * sd + self.mu
       return W
 
-   def getWeightSample(self):
-      sd = torch.log(1+torch.exp(self.ro.detach()))
-      W  = torch.randn(self.mu.detach().shape, dtype=self.dtype, device=self.dev) * sd + self.mu.detach()
-      return W
-      
-
    def posteriorLoss(self):
       sd = torch.log(1+torch.exp(self.ro.detach()))
-      return torch.mean(Normal(self.mu.detach(),sd).log_prob(self.getWeights()))
+      return torch.mean(Normal(self.mu.detach(),sd).log_prob(self.W))
 
-   def forward(self, x):
+   def forward(self, x, new_weights=True):
       # Sample weight matrix
-      W  = self.getWeights()
+      if new_weights:
+         W  = self.sampleWeights()
+         self.W = W
+      else:
+         W = self.W
 
       # Compute layer output
       x = torch.mm(x, W.t()) + self.b
@@ -61,8 +58,6 @@ class RandNet(nn.Module):
       self.dtype = torch.float32 if self.dev == 'cpu' else dtype
       self.out_func = out_func
 
-      print('RandNet dtype: {}'.format(self.dtype))
-
       # Arguments
       self.input_size  = layers[0]
       self.output_size = layers[-1]
@@ -70,9 +65,9 @@ class RandNet(nn.Module):
       # Create layers
       self.layers = nn.ModuleList([WULayer(i, o).type(self.dtype) for i,o in zip(layers[:-1], layers[1:])]).to(self.dev)
 
-   def forward(self, x):
+   def forward(self, x, new_weights=True):
       for layer in self.layers[:-1]:
-         x = torch.relu(layer(x))
+         x = torch.relu(layer(x, new_weights))
 
       return self.out_func(self.layers[-1](x))
 
@@ -85,8 +80,6 @@ class DetNet(nn.Module):
       self.dev = device if device is not None else 'cuda' if torch.cuda.is_available() else 'cpu'
       self.dtype = torch.float32 if self.dev == 'cpu' else dtype
       self.out_func = out_func
-
-      print('DetNet dtype: {}'.format(self.dtype))
 
       # Arguments
       self.input_size  = layers[0]
@@ -110,8 +103,6 @@ class UWAN(nn.Module):
       self.dev = device if device is not None else 'cuda' if torch.cuda.is_available() else 'cpu'
       self.dtype = torch.float32 if self.dev == 'cpu' else dtype
 
-      print('UWAN dtype: {}'.format(self.dtype))
-
       # Encoder and decoder
       self.encoder = encoder
       self.decoder = decoder
@@ -129,20 +120,20 @@ class UWAN(nn.Module):
       self.output_dim = decoder.output_size
       
 
-   def randWeightSample(self):
+   def getCurrentWeights(self):
       w_vec = torch.tensor([], dtype=self.dtype, device=self.dev)
       for l in self.encoder.layers:
-         w_vec = torch.cat((w_vec, l.getWeights().reshape(-1)))
+         w_vec = torch.cat((w_vec, l.W.reshape(-1)))
       for l in self.decoder.layers:
-         w_vec = torch.cat((w_vec, l.getWeights().reshape(-1)))
+         w_vec = torch.cat((w_vec, l.W.reshape(-1)))
       w_vec = w_vec.reshape((-1,1))
 
       return w_vec
 
        
-   def forward(self, x):
-      z = self.encoder(x)
-      y = self.decoder(z)
+   def forward(self, x, new_weights=True):
+      z = self.encoder(x, new_weights) if self.encoder.__class__.__name__ == 'RandNet' else self.encoder(x)
+      y = self.decoder(z, new_weights) if self.decoder.__class__.__name__ == 'RandNet' else self.decoder(z)
     
       return y, z
 
@@ -239,7 +230,7 @@ class UWAN(nn.Module):
             z_loss = func.binary_cross_entropy(dz, target_zreal[:b_size])
             z_blos += float(z_loss.detach().to('cpu').numpy())
             # Weight distribution loss
-            prior_loss = torch.mean(self.w_dist.logProb(self.randWeightSample(), dtype=self.dtype, device=self.dev))
+            prior_loss = torch.mean(self.w_dist.logProb(self.getCurrentWeights(), dtype=self.dtype, device=self.dev))
             posterior_loss = torch.tensor([0.0], device=self.dev, dtype=self.dtype)
             for n_layers,(lenc, ldec) in enumerate(zip(self.encoder.layers, self.decoder.layers)):
                posterior_loss += .5*(lenc.posteriorLoss() + ldec.posteriorLoss())
@@ -341,6 +332,7 @@ class GaussianMixture():
       mix_a = Normal(self.mu_a, self.sd_a).log_prob(samples) + torch.log(torch.tensor([self.p_a], dtype=dtype).to(device))
       mix_b = Normal(self.mu_b, self.sd_b).log_prob(samples) + torch.log(torch.tensor([1-self.p_a], dtype=dtype).to(device))
       return torch.logsumexp(torch.cat([mix_a.view(-1,1), mix_b.view(-1,1)], dim=1),dim=1)
+  
   
 
 if __name__ == "__main__":
