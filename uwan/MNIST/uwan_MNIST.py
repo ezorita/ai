@@ -301,7 +301,7 @@ class UWAN(nn.Module):
                zds_blos/(batch_no+1),
                zds_bacc/(batch_no+1)*100,
                pri_blos/(batch_no+1),
-               pos_blos/(batch_no+1)*100,
+               pos_blos/(batch_no+1),
                rec_blos/(batch_no+1),
                z_blos/(batch_no+1),
                torch.cuda.memory_allocated()/1e6

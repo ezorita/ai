@@ -241,7 +241,7 @@ class UWAN(nn.Module):
             zds_blos/batch_no,
             zds_bacc/batch_no*100,
             pri_blos/batch_no,
-            pos_blos/batch_no*100,
+            pos_blos/batch_no,
             rec_blos/batch_no,
             z_blos/batch_no
          ))
