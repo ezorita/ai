@@ -6,6 +6,7 @@ import torch.nn.functional as func
 import torch.utils.data as Data
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 from torch.distributions.normal import Normal
 
@@ -139,6 +140,12 @@ class UWAN(nn.Module):
 
          
    def optimize(self, train_data, test_data, epochs, batch_size, lr=1e-3, n_test_img=6, prior_std=5.0):
+
+      # Create directories
+      if not os.path.exists('{}/test_digits'.format(os.getcwd())):
+         os.makedirs('{}/test_digits'.format(os.getcwd()))
+      if not os.path.exists('{}/latent_space'.format(os.getcwd())):
+         os.makedirs('{}/latent_space'.format(os.getcwd()))
 
       # Optimizer
       enc_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
@@ -309,7 +316,14 @@ class UWAN(nn.Module):
             f.canvas.draw()
             plt.pause(0.001)
             if save_images:
-               plt.savefig('test_digits_{}.png'.format(e+1))
+               f.savefig('test_digits/uwan_MNIST_test_digits_{}.png'.format(e+1))
+
+            # Latent space
+            z = z.detach().to('cpu').numpy()
+            plt.figure()
+            plt.scatter(z[:,0], z[:,1], c=test.targets, s=0.8)
+            plt.savefig('latent_space/uwan_MNIST_latent_space_{}.png'.format(e+1))
+            plt.close()
 
       return rec_log, zds_log, zds_acc_log, pri_log, pos_log, fol_log, rec_test_log, zds_test_log, zds_acc_test_log, fol_test_log
 
@@ -368,13 +382,6 @@ if __name__ == "__main__":
    plt.plot(rec_test_log)
    plt.legend(['Train', 'Test'])
    plt.savefig('uwan_MNIST_train_loss.png')
-
-   # Latent space
-   y, z = uwan(test_data.to(uwan.dev))
-   z = z.detach().to('cpu').numpy()
-   plt.figure()
-   plt.scatter(z[:,0], z[:,1], c=test.targets, s=0.8)
-   plt.savefig('uwan_MNIST_latent_space.png')
 
    # Number reconstruction
    samples = 30

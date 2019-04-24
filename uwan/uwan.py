@@ -1,5 +1,5 @@
 import pdb
-import sys
+import sys, os
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
@@ -69,7 +69,7 @@ class RandNet(nn.Module):
       for layer in self.layers[:-1]:
          x = torch.relu(layer(x, new_weights))
 
-      return self.out_func(self.layers[-1](x))
+      return self.out_func(self.layers[-1](x)) if self.out_func != nn.functional.softmax else nn.functional.softmax(self.layers[-1](x),dim=1)
 
    
 class DetNet(nn.Module):
@@ -92,7 +92,7 @@ class DetNet(nn.Module):
       for layer in self.layers[:-1]:
          x = torch.relu(layer(x))
 
-      return self.out_func(self.layers[-1](x))
+      return self.out_func(self.layers[-1](x)) if self.out_func != nn.functional.softmax else nn.functional.softmax(self.layers[-1](x),dim=1)
 
    
 class UWAN(nn.Module):
@@ -138,7 +138,12 @@ class UWAN(nn.Module):
       return y, z
 
          
-   def optimize(self, train_data, test_data, epochs, batch_size, lr=1e-3, prior_std=5.0):
+   def optimize(self, train_data, test_data, epochs, batch_size, lr=1e-3, prior_std=5.0, rec_loss_func=nn.functional.binary_cross_entropy):
+
+      # Create directories
+      if not os.path.exists('{}/latent_space'.format(os.getcwd())):
+         os.makedirs('{}/latent_space'.format(os.getcwd()))
+
 
       # Optimizer
       enc_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
@@ -209,7 +214,7 @@ class UWAN(nn.Module):
             y, z = self(data)
             dz = self.z_disc(z)
             # Reconstruction loss
-            rec_loss = func.binary_cross_entropy(y, data)
+            rec_loss = rec_loss_func(y, data)
             rec_blos += float(rec_loss.detach().to('cpu').numpy())
             # Latent space distribution loss
             z_loss = func.binary_cross_entropy(dz, target_zreal[:b_size])
@@ -272,29 +277,12 @@ class UWAN(nn.Module):
          # Latent space distribution loss
          fol_test_log[e] = float(func.binary_cross_entropy(dz, target_testreal).detach().to('cpu'))
 
-         if save_images or show_images:
-            test_out, _ = self(test_imgs)
-            test_out = test_out.detach().to('cpu').numpy()
-            for i in range(n_test_img):
-                a[1][i].imshow(1.0-np.reshape(test_out[i], (28,28)), cmap='gray')
-                a[1][i].set_xticks(())
-                a[1][i].set_yticks(())
-
-            loss_text.set_text('epoch: {}-{}, z-Discriminator: {:.3f} ({:.3f}%), KL-weights Prior: {:.3f}, posterior: {:.3f}, Autoencoder Rec: {:.3f}, Z-fool: {:.3f}, CUDA mem: {:.2f}MB  \r'.format(
-               e+1,
-               batch_no+1,
-               zds_blos/(batch_no+1),
-               zds_bacc/(batch_no+1)*100,
-               pri_blos/(batch_no+1),
-               pos_blos/(batch_no+1)*100,
-               rec_blos/(batch_no+1),
-               z_blos/(batch_no+1),
-               torch.cuda.memory_allocated()/1e6
-            ))
-            f.canvas.draw()
-            plt.pause(0.001)
-            if save_images:
-               plt.savefig('test_digits_{}.png'.format(e+1))
+         # Latent space
+         z = z.detach().to('cpu').numpy()
+         plt.figure()
+         plt.scatter(z[:,0], z[:,1], s=0.8)
+         plt.savefig('latent_space/uwan_latent_space_{}.png'.format(e+1))
+         plt.close()
 
       return rec_log, zds_log, zds_acc_log, pri_log, pos_log, fol_log, rec_test_log, zds_test_log, zds_acc_test_log, fol_test_log
 
@@ -317,4 +305,3 @@ class GaussianMixture():
       mix_a = Normal(self.mu_a, self.sd_a).log_prob(samples) + torch.log(torch.tensor([self.p_a], dtype=dtype).to(device))
       mix_b = Normal(self.mu_b, self.sd_b).log_prob(samples) + torch.log(torch.tensor([1-self.p_a], dtype=dtype).to(device))
       return torch.logsumexp(torch.cat([mix_a.view(-1,1), mix_b.view(-1,1)], dim=1),dim=1)
-  
